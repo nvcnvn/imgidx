@@ -9,7 +9,7 @@ import (
 	"tipimage/color"
 )
 
-func PHash(src tipimage.Image) (hash uint64, part [8]uint8) {
+func PHash(src tipimage.Image) (hash int64, part [8]int8) {
 	scaled := Resize(src, src.Bounds(), 32, 32)
 	var image [32][32]float64
 	for x := 0; x < 32; x++ {
