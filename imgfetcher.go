@@ -8,9 +8,11 @@ import (
 	"appengine/blobstore"
 	imgs "appengine/image"
 	"bytes"
+	"container/list"
 	"crypto/md5"
 	"errors"
 	"github.com/openvn/nstuff"
+	"github.com/openvn/nstuff/model"
 	"io/ioutil"
 	"tipimage"
 	_ "tipimage/gif"
@@ -24,25 +26,40 @@ type ImageInfo struct {
 }
 
 func IndexImage(s *nstuff.Host, url string, deep int) {
-	if deep < 0 {
-		return
-	}
-	c := make(chan ImageInfo)
-	go FetchSrc(s, url, c)
-	for i := range c {
-		s.Print(i)
+	pageList := list.New()
+	pageList.PushBack(url)
+	for pageList.Len() > 0 {
+		url = pageList.Remove(pageList.Front()).(string)
+		key, err := s.Conn.Storage("Page").NewQuery().KeysOnly().
+			Filter("Location", model.EQ, url).GetFirst(nil)
+		if err != model.ErrNotFound {
+			s.Log("--%s--\n", key)
+			return
+		}
+
+		key, err = s.Conn.Storage("Page").Put(&Page{url})
+		resp, err := s.Client.Get(url)
+		if err != nil {
+			return
+		}
+		data, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+		imgChan := make(chan ImageInfo)
+		go FetchSrc(s, data, imgChan)
+		pageChan := make(chan string)
+		go FetchPage(s, data, pageChan)
+		for i := range imgChan {
+			s.Print(i, "\n")
+		}
+		for i := range pageChan {
+			s.Print(i, "\n")
+		}
 	}
 }
 
-func FetchSrc(s *nstuff.Host, url string, ImgInf chan ImageInfo) {
-	resp, err := s.Client.Get(url)
-	if err != nil {
-		return
-	}
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
+func FetchSrc(s *nstuff.Host, data []byte, ImgInf chan ImageInfo) {
 	// openTag: <img
 	openTag := []byte{0x3c, 0x69, 0x6d, 0x67}
 	openPos := 0
@@ -88,6 +105,39 @@ func FetchSrc(s *nstuff.Host, url string, ImgInf chan ImageInfo) {
 	}
 	close(ImgInf)
 }
+
+func FetchPage(s *nstuff.Host, data []byte, PageInf chan string) {
+	// openTag: <a
+	openTag := []byte{0x3c, 0x61}
+	openPos := 0
+	closePos := 0
+	// hrefTag: href
+	hrefTag := []byte{0x68, 0x72, 0x65, 0x66}
+	hrefPos := 0
+	// quote: " (0x22)
+	quoteOpenPos := 0
+	quoteClosePos := 0
+	found := bytes.Index(data[openPos:], openTag)
+	var tmpSlice []byte
+	for found = bytes.Index(data[openPos:], openTag); found != -1; found = bytes.Index(data[openPos:], openTag) {
+		openPos = openPos + found + 3
+		closePos = bytes.IndexByte(data[openPos:], 0x3e)
+		tmpSlice = data[openPos : openPos+closePos]
+
+		hrefPos = bytes.Index(tmpSlice, hrefTag)
+		if hrefPos != -1 {
+			quoteOpenPos = bytes.IndexByte(tmpSlice[hrefPos+5:], 0x22)
+			if quoteOpenPos != -1 {
+				quoteClosePos = bytes.IndexByte(tmpSlice[hrefPos+5+quoteOpenPos+1:], 0x22)
+				if quoteClosePos != -1 {
+					PageInf <- string(tmpSlice[hrefPos+5+quoteOpenPos+1 : hrefPos+5+quoteOpenPos+quoteClosePos+1])
+				}
+			}
+		}
+	}
+	close(PageInf)
+}
+
 func FetchImage(s *nstuff.Host, url string, img *Image) error {
 	resp, err := s.Client.Get(url)
 	if err != nil {
@@ -147,9 +197,9 @@ func FetchImage(s *nstuff.Host, url string, img *Image) error {
 	}
 
 	// assign value
-	img.ID = string(key)
-	img.Source = url
-	img.Saved = link.String()
+	img.SavedID = string(key)
+	img.SavedLocation = link.String()
+	img.Location = url
 	img.CheckSum = checksum
 	img.PHash = hash
 	img.Part1 = part[0]
