@@ -6,8 +6,10 @@ package galleyes
 
 import (
 	"crypto/md5"
+	"encoding/base64"
 	"github.com/openvn/nstuff"
 	"io"
+	"strconv"
 	"tipimage"
 	_ "tipimage/gif"
 	_ "tipimage/jpeg"
@@ -53,37 +55,23 @@ func Hash(s *nstuff.Host) {
 			if err == nil {
 				h := md5.New()
 				io.Copy(h, file)
-				s.Print(PHash(m))
-				s.Print(h.Sum(nil))
+
+				s.Print("checksum=", base64.URLEncoding.EncodeToString(h.Sum(nil)))
+				phash, part := PHash(m)
+				s.Print("&phash=", phash, "&p1=", part[0], "&p2=", part[1], "&p3=", part[2])
+				s.Print("&p4=", part[3], "&p5=", part[4], "&p6=", part[5], "&p7=", part[6], "&p8=", part[1])
 			} else {
-				s.Print("invalid")
-				s.Print(err.Error())
+				s.Print("error=invalid_image&err_detail=", err.Error())
 			}
 		}
 	} else {
-		s.Print("invalid")
+		s.Print("error=invalid_input")
 	}
-}
-
-type Barer interface {
-	Bar() int
-}
-
-type Bar string
-
-type Test struct {
-	X int
-	Y Bar
 }
 
 func Search(s *nstuff.Host) {
-	test := Test{5, Bar("ABC")}
-	x, err := s.Conn.Storage("Image").Put(&test)
-	if err != nil {
-		s.Print(err.Error())
-		return
-	}
-	s.Print(x.Encode())
+	checksum, err := base64.URLEncoding.DecodeString(s.Get("checksum"))
+	phash, err := strconv.ParseInt(s.Get("phash"), 10, 64)
 }
 
 func Crawl(s *nstuff.Host) {
@@ -92,5 +80,5 @@ func Crawl(s *nstuff.Host) {
 		s.Print("error: invalid image url.")
 		return
 	}
-	IndexImage(s, page, 0)
+	NewImageIndex(s, page, 0).Index()
 }

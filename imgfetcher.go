@@ -14,31 +14,54 @@ import (
 	"github.com/openvn/nstuff"
 	"github.com/openvn/nstuff/model"
 	"io/ioutil"
+	"runtime"
+	"sync"
 	"tipimage"
 	_ "tipimage/gif"
 	_ "tipimage/jpeg"
 	_ "tipimage/png"
 )
 
-type ImageInfo struct {
-	Src string
-	Alt string
+type imageInfo struct {
+	src string
+	alt string
 }
 
-func IndexImage(s *nstuff.Host, url string, deep int) {
-	pageList := list.New()
-	pageList.PushBack(url)
-	for pageList.Len() > 0 {
-		url = pageList.Remove(pageList.Front()).(string)
-		key, err := s.Conn.Storage("Page").NewQuery().KeysOnly().
-			Filter("Location", model.EQ, url).GetFirst(nil)
+type pageInfo struct {
+	url  string
+	deep int
+}
+
+type ImageIndex struct {
+	pageList *list.List
+	s        *nstuff.Host
+	rootURL  string
+	deep     int
+	wg       sync.WaitGroup
+}
+
+func NewImageIndex(s *nstuff.Host, url string, deep int) *ImageIndex {
+	i := &ImageIndex{}
+	i.s = s
+	i.rootURL = url
+	i.deep = deep
+	return i
+}
+
+func (i *ImageIndex) Index() {
+	runtime.GOMAXPROCS(20)
+	i.pageList = list.New()
+	i.pageList.PushBack(pageInfo{i.rootURL, 0})
+
+	for i.pageList.Len() > 0 {
+		p := i.pageList.Remove(i.pageList.Front()).(pageInfo)
+		key, err := i.s.Conn.Storage("Page").NewQuery().KeysOnly().
+			Filter("Location", model.EQ, p.url).GetFirst(nil)
 		if err != model.ErrNotFound {
-			s.Log("--%s--\n", key)
-			return
+			continue
 		}
 
-		key, err = s.Conn.Storage("Page").Put(&Page{url})
-		resp, err := s.Client.Get(url)
+		resp, err := i.s.Client.Get(p.url)
 		if err != nil {
 			return
 		}
@@ -46,20 +69,20 @@ func IndexImage(s *nstuff.Host, url string, deep int) {
 		if err != nil {
 			return
 		}
-		imgChan := make(chan ImageInfo)
-		go FetchSrc(s, data, imgChan)
-		pageChan := make(chan string)
-		go FetchPage(s, data, pageChan)
-		for i := range imgChan {
-			s.Print(i, "\n")
+		if i.deep < 0 {
+			i.FetchPage(data, p.deep+1)
+		} else {
+			if p.deep < i.deep {
+				i.FetchPage(data, p.deep+1)
+			}
 		}
-		for i := range pageChan {
-			s.Print(i, "\n")
-		}
+		key, err = i.s.Conn.Storage("Page").Put(&Page{p.url})
+		i.FetchSrc(data, key.Encode())
 	}
+	i.wg.Wait()
 }
 
-func FetchSrc(s *nstuff.Host, data []byte, ImgInf chan ImageInfo) {
+func (i *ImageIndex) FetchSrc(data []byte, pageID string) {
 	// openTag: <img
 	openTag := []byte{0x3c, 0x69, 0x6d, 0x67}
 	openPos := 0
@@ -75,6 +98,7 @@ func FetchSrc(s *nstuff.Host, data []byte, ImgInf chan ImageInfo) {
 	quoteClosePos := 0
 	found := bytes.Index(data[openPos:], openTag)
 	var tmpSlice []byte
+	var url string
 	for found = bytes.Index(data[openPos:], openTag); found != -1; found = bytes.Index(data[openPos:], openTag) {
 		openPos = openPos + found + 5
 		closePos = bytes.IndexByte(data[openPos:], 0x3e)
@@ -98,15 +122,15 @@ func FetchSrc(s *nstuff.Host, data []byte, ImgInf chan ImageInfo) {
 			if quoteOpenPos != -1 {
 				quoteClosePos = bytes.IndexByte(tmpSlice[srcPos+4+quoteOpenPos+1:], 0x22)
 				if quoteClosePos != -1 {
-					ImgInf <- ImageInfo{string(tmpSlice[srcPos+4+quoteOpenPos+1 : srcPos+4+quoteOpenPos+quoteClosePos+1]), alt}
+					url, _ = FullURL(i.rootURL, string(tmpSlice[srcPos+4+quoteOpenPos+1:srcPos+4+quoteOpenPos+quoteClosePos+1]))
+					go i.FetchImage(imageInfo{url, alt}, pageID)
 				}
 			}
 		}
 	}
-	close(ImgInf)
 }
 
-func FetchPage(s *nstuff.Host, data []byte, PageInf chan string) {
+func (i *ImageIndex) FetchPage(data []byte, deep int) {
 	// openTag: <a
 	openTag := []byte{0x3c, 0x61}
 	openPos := 0
@@ -119,6 +143,7 @@ func FetchPage(s *nstuff.Host, data []byte, PageInf chan string) {
 	quoteClosePos := 0
 	found := bytes.Index(data[openPos:], openTag)
 	var tmpSlice []byte
+	var url string
 	for found = bytes.Index(data[openPos:], openTag); found != -1; found = bytes.Index(data[openPos:], openTag) {
 		openPos = openPos + found + 3
 		closePos = bytes.IndexByte(data[openPos:], 0x3e)
@@ -130,25 +155,35 @@ func FetchPage(s *nstuff.Host, data []byte, PageInf chan string) {
 			if quoteOpenPos != -1 {
 				quoteClosePos = bytes.IndexByte(tmpSlice[hrefPos+5+quoteOpenPos+1:], 0x22)
 				if quoteClosePos != -1 {
-					PageInf <- string(tmpSlice[hrefPos+5+quoteOpenPos+1 : hrefPos+5+quoteOpenPos+quoteClosePos+1])
+					url, _ = FullURL(i.rootURL, string(tmpSlice[hrefPos+5+quoteOpenPos+1:hrefPos+5+quoteOpenPos+quoteClosePos+1]))
+					i.pageList.PushBack(pageInfo{url, deep})
 				}
 			}
 		}
 	}
-	close(PageInf)
 }
 
-func FetchImage(s *nstuff.Host, url string, img *Image) error {
-	resp, err := s.Client.Get(url)
+func (i *ImageIndex) FetchImage(info imageInfo, pageID string) error {
+	i.wg.Add(1)
+	_, err := i.s.Conn.Storage("Image").NewQuery().KeysOnly().
+		Filter("Location", model.EQ, info.src).GetFirst(nil)
+	if err != model.ErrNotFound {
+		i.wg.Done()
+		return errors.New("galleyes: indexed image")
+	}
+	resp, err := i.s.Client.Get(info.src)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 	mime := resp.Header.Get("Content-Type")
 	if mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" {
+		i.wg.Done()
 		return errors.New("galleyes: not supported image format")
 	}
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 
@@ -156,11 +191,12 @@ func FetchImage(s *nstuff.Host, url string, img *Image) error {
 	var buff bytes.Buffer
 	_, err = buff.Write(data)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 	m, _, err := tipimage.Decode(&buff)
 	if err != nil {
-		s.Print(ioutil.ReadAll(&buff))
+		i.wg.Done()
 		return err
 	}
 	hash, part := PHash(m)
@@ -169,37 +205,46 @@ func FetchImage(s *nstuff.Host, url string, img *Image) error {
 	h := md5.New()
 	_, err = h.Write(data)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 	checksum := h.Sum(nil)
 
 	// save the original image
-	w, err := blobstore.Create(s.Context, mime)
+	w, err := blobstore.Create(i.s.Context, mime)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 	w.Write(data)
 	_, err = w.Write(data)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 	err = w.Close()
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 	key, err := w.Key()
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
-	link, err := imgs.ServingURL(s.Context, key, nil)
+	link, err := imgs.ServingURL(i.s.Context, key, nil)
 	if err != nil {
+		i.wg.Done()
 		return err
 	}
 
 	// assign value
+	img := Image{}
+	img.PageID = pageID
 	img.SavedID = string(key)
 	img.SavedLocation = link.String()
-	img.Location = url
+	img.Location = info.src
+	img.Description = info.alt
 	img.CheckSum = checksum
 	img.PHash = hash
 	img.Part1 = part[0]
@@ -210,5 +255,12 @@ func FetchImage(s *nstuff.Host, url string, img *Image) error {
 	img.Part6 = part[5]
 	img.Part7 = part[6]
 	img.Part8 = part[7]
+	_, err = i.s.Conn.Storage("Image").Put(&img)
+	if err != nil {
+		i.wg.Done()
+		return err
+	}
+
+	i.wg.Done()
 	return nil
 }
