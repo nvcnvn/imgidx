@@ -9,8 +9,9 @@ type Page struct {
 }
 
 type Image struct {
-	CheckSum      []byte
+	CheckSum      string
 	PHash         int64
+	Part0         int8
 	Part1         int8
 	Part2         int8
 	Part3         int8
@@ -18,7 +19,6 @@ type Image struct {
 	Part5         int8
 	Part6         int8
 	Part7         int8
-	Part8         int8
 	SavedID       string
 	SavedLocation string
 	Location      string

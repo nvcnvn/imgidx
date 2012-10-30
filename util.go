@@ -5,6 +5,8 @@
 package galleyes
 
 import (
+	"bytes"
+	"github.com/openvn/nstuff"
 	"net/url"
 	"path"
 )
@@ -41,4 +43,27 @@ func FullURL(abs, href string) (string, error) {
 	}
 
 	return result, nil
+}
+
+func fullResult(s *nstuff.Host, img Image) string {
+	var buff bytes.Buffer
+	buff.WriteString(img.SavedLocation)
+	buff.WriteString("|-|-|")
+	buff.WriteString(img.Description)
+	buff.WriteString("|-|-|")
+	buff.WriteString(img.Location)
+
+	pagCol := s.Conn.Storage("Page")
+	key, err := pagCol.DecodeKey(img.PageID)
+	if err != nil {
+		return buff.String()
+	}
+	var page Page
+	err = pagCol.Get(key, &page)
+	if err != nil {
+		return buff.String()
+	}
+	buff.WriteString("|-|-|")
+	buff.WriteString(page.Location)
+	return buff.String()
 }

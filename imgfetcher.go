@@ -10,7 +10,7 @@ import (
 	"bytes"
 	"container/list"
 	"crypto/md5"
-	"errors"
+	"encoding/base64"
 	"github.com/openvn/nstuff"
 	"github.com/openvn/nstuff/model"
 	"io/ioutil"
@@ -163,41 +163,47 @@ func (i *ImageIndex) FetchPage(data []byte, deep int) {
 	}
 }
 
-func (i *ImageIndex) FetchImage(info imageInfo, pageID string) error {
+func (i *ImageIndex) FetchImage(info imageInfo, pageID string) {
 	i.wg.Add(1)
 	_, err := i.s.Conn.Storage("Image").NewQuery().KeysOnly().
 		Filter("Location", model.EQ, info.src).GetFirst(nil)
 	if err != model.ErrNotFound {
+		i.s.Log("Error: %s\n", "galleyes: indexed image")
 		i.wg.Done()
-		return errors.New("galleyes: indexed image")
+		return
 	}
 	resp, err := i.s.Client.Get(info.src)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	mime := resp.Header.Get("Content-Type")
 	if mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" {
+		i.s.Log("Error: %s - %s - %s\n", "galleyes: not supported image format", mime, info.src)
 		i.wg.Done()
-		return errors.New("galleyes: not supported image format")
+		return
 	}
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 
 	// caculate PHash
 	var buff bytes.Buffer
 	_, err = buff.Write(data)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	m, _, err := tipimage.Decode(&buff)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	hash, part := PHash(m)
 
@@ -205,37 +211,43 @@ func (i *ImageIndex) FetchImage(info imageInfo, pageID string) error {
 	h := md5.New()
 	_, err = h.Write(data)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	checksum := h.Sum(nil)
 
 	// save the original image
 	w, err := blobstore.Create(i.s.Context, mime)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	w.Write(data)
 	_, err = w.Write(data)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	err = w.Close()
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	key, err := w.Key()
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 	link, err := imgs.ServingURL(i.s.Context, key, nil)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
 
 	// assign value
@@ -245,22 +257,21 @@ func (i *ImageIndex) FetchImage(info imageInfo, pageID string) error {
 	img.SavedLocation = link.String()
 	img.Location = info.src
 	img.Description = info.alt
-	img.CheckSum = checksum
+	img.CheckSum = base64.URLEncoding.EncodeToString(checksum)
 	img.PHash = hash
-	img.Part1 = part[0]
-	img.Part2 = part[1]
-	img.Part3 = part[2]
-	img.Part4 = part[3]
-	img.Part5 = part[4]
-	img.Part6 = part[5]
-	img.Part7 = part[6]
-	img.Part8 = part[7]
+	img.Part0 = part[0]
+	img.Part1 = part[1]
+	img.Part2 = part[2]
+	img.Part3 = part[3]
+	img.Part4 = part[4]
+	img.Part5 = part[5]
+	img.Part6 = part[6]
+	img.Part7 = part[7]
 	_, err = i.s.Conn.Storage("Image").Put(&img)
 	if err != nil {
+		i.s.Log("Error: %s\n", err.Error())
 		i.wg.Done()
-		return err
+		return
 	}
-
 	i.wg.Done()
-	return nil
 }
