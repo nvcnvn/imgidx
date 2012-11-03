@@ -5,8 +5,9 @@
 package galleyes
 
 import (
-	"bytes"
+	"encoding/json"
 	"github.com/openvn/nstuff"
+	"github.com/openvn/nstuff/model"
 	"net/url"
 	"path"
 )
@@ -45,25 +46,87 @@ func FullURL(abs, href string) (string, error) {
 	return result, nil
 }
 
-func fullResult(s *nstuff.Host, img Image) string {
-	var buff bytes.Buffer
-	buff.WriteString(img.SavedLocation)
-	buff.WriteString("|-|-|")
-	buff.WriteString(img.Description)
-	buff.WriteString("|-|-|")
-	buff.WriteString(img.Location)
+type JsonImage struct {
+	SavedLocation string
+	Description   string
+	Location      string
+	PageLocation  string
+}
 
+func fullResult(s *nstuff.Host, img []Image) string {
+	n := len(img)
+	result := make([]JsonImage, n, n)
 	pagCol := s.Conn.Storage("Page")
-	key, err := pagCol.DecodeKey(img.PageID)
-	if err != nil {
-		return buff.String()
-	}
 	var page Page
-	err = pagCol.Get(key, &page)
-	if err != nil {
-		return buff.String()
+	for i := 0; i < n; i++ {
+		result[i].Description = img[i].Description
+		result[i].Location = img[i].Location
+		result[i].SavedLocation = img[i].SavedLocation
+		key, err := pagCol.DecodeKey(img[i].PageID)
+		if err != nil {
+			continue
+		}
+		err = pagCol.Get(key, &page)
+		if err != nil {
+			continue
+		}
+		result[i].PageLocation = page.Location
 	}
-	buff.WriteString("|-|-|")
-	buff.WriteString(page.Location)
-	return buff.String()
+	b, err := json.Marshal(result)
+	if err == nil {
+		return string(b)
+	}
+	return ""
+}
+
+func FindImage(s *nstuff.Host, checksum string, phash int64, p [8]int8) {
+	var err error
+	imgColl := s.Conn.Storage("Image")
+	//find exacts image
+	var exacts []Image
+	_, err = imgColl.NewQuery().Filter("CheckSum", model.EQ, checksum).GetAll(&exacts)
+	if err == nil {
+		s.Print("parent.ShowResult('", fullResult(s, exacts), "');\n")
+	}
+	//find very similars image
+	var similars []Image
+	_, err = imgColl.NewQuery().Filter("CheckSum", model.GT, checksum).
+		Filter("PHash", model.EQ, phash).GetAll(&similars)
+	if err == nil {
+		s.Print("parent.ShowResult('", fullResult(s, similars), "');\n")
+	}
+	_, err = imgColl.NewQuery().Filter("CheckSum", model.LT, checksum).
+		Filter("PHash", model.EQ, phash).GetAll(&similars)
+	if err == nil {
+		s.Print("parent.ShowResult('", fullResult(s, similars), "');\n")
+	}
+	//find some maybe image
+	part := [8]string{"Part0", "Part1", "Part2", "Part3", "Part4", "Part5", "Part6", "Part7"}
+	var maybes []Image
+	for i := 0; i < 8; i++ {
+		a := imgColl.NewQuery()
+		for j := 0; j < 8; j++ {
+			if j == i {
+				a.Filter(part[j], model.GT, p[j])
+			} else {
+				a.Filter(part[j], model.EQ, p[j])
+			}
+		}
+		_, err = a.GetAll(&maybes)
+		if err == nil {
+			s.Print("parent.ShowResult('", fullResult(s, maybes), "');\n")
+		}
+		b := imgColl.NewQuery()
+		for j := 0; j < 8; j++ {
+			if j == i {
+				b.Filter(part[j], model.LT, p[j])
+			} else {
+				b.Filter(part[j], model.EQ, p[j])
+			}
+		}
+		_, err = b.GetAll(&maybes)
+		if err == nil {
+			s.Print("parent.ShowResult('", fullResult(s, maybes), "');\n")
+		}
+	}
 }
